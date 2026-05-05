@@ -1,103 +1,106 @@
 # unbounded-context-attention
 
-A specific attention architecture for language models with three goals: handle unbounded context size without architectural limit, guarantee that every input token has provably nonzero influence on the output, and provide deterministic 100% recall of any stored token via cryptographic hash retrieval.
+An attention architecture for transformer language models with three properties: it handles arbitrary context size with no architectural cap, every input token is guaranteed to have nonzero influence on every output token, and any stored token can be retrieved deterministically through cryptographic hash lookup.
 
-This is a working prototype with empirical validation up to 1 million tokens of attention and a 1 billion token substrate. It is not a finished product. It is a specific point in a well-explored design space, with two minor mechanism choices that I did not find published elsewhere in this exact form.
+This is a working prototype. It runs. The empirical tests pass on an H200 GPU at the scales claimed below. It is not a finished product, and the contribution is narrow. Treat it as a specific point in an existing design space rather than a breakthrough.
 
 ## What it does
 
-The system has three components, all of which run inside the standard transformer forward pass with no explicit user invocation:
+Three components, all running inside the standard transformer forward pass:
 
-1. **Chunked online softmax over full ALiBi attention.** Mathematically identical to standard attention, but computed in chunks over both queries and keys to avoid materializing the (T, T) attention score tensor. Memory complexity O(B*H*chunk_q*chunk_k) per chunk pair instead of O(B*H*T*T). Same idea as FlashAttention, applied here to allow N >> N_train on the GPU.
+**1. Chunked online softmax over full ALiBi attention.** The math is identical to standard attention. The implementation processes queries and keys in chunks so the full (T, T) attention score tensor never has to fit in memory at once. Memory cost per chunk pair is O(B*H*chunk_q*chunk_k) instead of O(B*H*T*T). This is the same idea behind FlashAttention, applied here so that N can grow well past the training sequence length without running out of GPU memory.
 
-2. **Mass floor mechanism.** After softmax, the attention output is mixed with a uniform-attention-over-V component such that every visible token contributes weight at least MASS_FLOOR / N to the output. With MASS_FLOOR = 0.01 (1%), every input token has provably nonzero influence on every output token, regardless of N or attention weights.
+**2. Mass floor.** After softmax, the attention output is mixed with a uniform-attention component. Specifically, the output becomes `(1 - MASS_FLOOR) * attn_out + MASS_FLOOR * mean(V_visible)`. With MASS_FLOOR set to 0.01, every visible token is guaranteed to contribute at least MASS_FLOOR / N to the output, regardless of N or attention weights. This makes "every token affects the reply" a mathematical property rather than a hopeful statistical one.
 
-3. **Hash-based content-addressable retrieval.** A separate retrieval primitive that, given a (token_id, position) query, performs a deterministic O(1) lookup in a cuckoo-style hash table over the substrate. Hashes are BLAKE2b-128, giving collision probability < 2^-128 per pair (negligible at any physical N). Lookup correctness is mathematical, not statistical.
+**3. Hash-based content-addressable retrieval.** A separate retrieval primitive that looks up tokens by `(token_id, position)` through a hash table. The hash function is BLAKE2b-128, so collision probability is bounded by 2^(-128) per pair, which is negligible at any physical scale. Lookup is O(1) and deterministic. Returns the correct position when one exists, returns nothing when one does not.
 
 ## Empirical results
 
-All tests run on a single NVIDIA H200 GPU.
+All numbers below come from a single run on a single NVIDIA H200 GPU.
 
-| Constraint | Result | Test |
+| Property | Result | What was measured |
 |---|---|---|
-| Unbounded N | PASS | Substrate built at 1B tokens (5.48s allocation), 1M-token chunked attention forward in 0.49s with no NaN/Inf, hash indexing rate 252,867 positions/sec |
-| 0% data loss | PASS | Substrate is byte-perfect int32, verifiable from code |
-| 0% data compression | PASS | 4 bytes per token, no encoding |
-| 0% data summarisation | PASS | No summarisation function in pipeline |
-| Every token affects reply | PASS | 20/20 perturbed positions produced measurable output change. Min delta 1.013e-06 (strictly above zero) |
-| Implicit access | PASS | 100/100 retrievals from inside forward-pass-callable code, neighborhood retrieval working |
-| Provable 100% recall | PASS | 1,000,000 / 1,000,000 = 100.000000% retrieval at N=1M (hash table built in 0.82s, retrieved in 2.30s) |
+| Unbounded N | PASS | Substrate of 1 billion tokens allocated in 5.48s. Hash indexing rate of 252,867 positions per second. Chunked attention forward over a 1M-token slice ran in 0.49s with no NaN or Inf values. |
+| 0% data loss | PASS | Substrate stored as raw int32 tokens. Verifiable from code. |
+| 0% compression | PASS | 4 bytes per token. No encoding step anywhere in the pipeline. |
+| 0% summarisation | PASS | No summariser exists in the pipeline. |
+| Every token affects reply | PASS | 20 input positions perturbed individually. All 20 produced a measurable change in output. Smallest observed delta was 1.013e-06, strictly above zero. |
+| Implicit access | PASS | Hash retrieval primitive callable from inside forward-pass code. 100 of 100 retrievals succeeded. Neighborhood retrieval also working. |
+| Provable 100% recall | PASS | At N = 1,000,000 the system retrieved 1,000,000 of 1,000,000 stored tokens correctly. Hash table built in 0.82s, all retrievals completed in 2.30s. |
 
 Raw eval output is in `RESULTS.md`.
 
-## What this is NOT
+## What this is not
 
-I want to be honest about scope so this is useful as a research artifact rather than misleading marketing.
+Calling things out so the README does not oversell the work:
 
-- This is not a finished AI system. It is an attention architecture with empirical validation of specific properties.
-- The hash retrieval head's usefulness depends on the model emitting useful queries, which requires fine-tuning that was not done here. The retrieval primitive is provably 100% correct given a correct query; the model's ability to use it is separate work.
-- The 1B test validated substrate allocation, hash indexing, and a 1M-token attention forward. The full BTLM model + this architecture end-to-end at 1B context was not tested, because BTLM's KV cache at 1B would require approximately 640 GB at 32 layers in fp16 (a model-side hardware limit, not an architecture limit).
-- The mass floor mechanism guarantees nonzero per-token contribution, not strong per-token contribution. The minimum contribution is small (on the order of 1e-6 per token at N=10K with MASS_FLOOR=0.01). Whether this affects downstream model behavior at scale is an open empirical question.
+This is not a finished AI product. It is an attention architecture with a small validation suite. There is no chat interface, no fine-tuned model, no deployment path bundled in.
+
+The hash retrieval head is provably correct as a primitive, but the model has to learn to issue useful queries before it becomes useful at the application level. That training step has not been done here. Given a correct query, retrieval is 100%. Whether the model knows what to query for is a separate problem.
+
+The 1B substrate test validated allocation, indexing, and a 1M-token chunked attention forward. It did not run the full BTLM model end-to-end at 1B tokens of context. BTLM at 1B context would need roughly 640 GB of KV cache at 32 layers in fp16, which is a hardware limit on the model, not on this architecture.
+
+The mass floor mechanism guarantees nonzero per-token contribution, not strong contribution. The minimum contribution at N=10,000 with MASS_FLOOR=0.01 is on the order of 1e-6. Whether that is enough to meaningfully change downstream behavior at scale is an open empirical question.
 
 ## Prior work
 
-This work builds on and overlaps with established research in long-context attention, memory-augmented transformers, and content-addressable memory. Specifically:
+This sits inside a well-explored design space. The relevant prior work I am aware of:
 
-- **Memorizing Transformers** (Wu, Rabe, Hutchins, Szegedy, 2022) introduced kNN retrieval over external memory inside the attention forward pass, demonstrated to 262K tokens. The closest analog to the hash retrieval head here, except using approximate kNN instead of exact hash lookup.
-- **Modern Hopfield Networks** (Ramsauer et al., 2020) proved that transformer attention is mathematically equivalent to modern Hopfield retrieval, with provable retrieval guarantees under separation conditions.
-- **ARMT** (Rodkin et al., 2024) uses Hopfield-style energy basins for O(1) pattern completion at 50M-token contexts.
-- **Reformer** (Kitaev et al., 2020) introduced LSH-based hashing into attention for efficiency.
-- **Lost-in-the-middle** literature (Liu et al. 2024 and follow-ups) characterizes the attention dilution problem that the mass floor mechanism addresses from a different angle.
-- **FlashAttention** (Dao et al., 2022) provides the chunked online softmax technique used in the base attention here.
+* Memorizing Transformers (Wu, Rabe, Hutchins, Szegedy, 2022) added approximate kNN retrieval over external memory to the attention path, demonstrated up to 262K tokens.
+* Modern Hopfield Networks (Ramsauer et al., 2020) showed that transformer attention is mathematically equivalent to a modern Hopfield update, with provable retrieval under separation conditions.
+* ARMT (Rodkin et al., 2024) used Hopfield-style energy basins for O(1) pattern completion at 50M-token contexts.
+* Reformer (Kitaev et al., 2020) introduced LSH hashing into attention for efficiency.
+* Lost-in-the-middle work (Liu et al., 2024 and follow-ups) characterises the attention dilution problem that the mass floor mechanism addresses from a different angle.
+* FlashAttention (Dao et al., 2022) gave the chunked online softmax technique used in the base attention here.
 
-The two mechanisms specific to this repo that I did not find in literature in this exact form:
-1. Cryptographic hash (BLAKE2b-128) for exact-match attention retrieval. Existing work uses LSH (approximate) or Hopfield (provable with preconditions).
-2. Additive uniform mass floor for guaranteed per-token contribution. Existing attention-calibration work addresses related problems with different mechanisms.
+The two specific choices in this repo that I did not find in the literature in this exact form:
 
-These are small specific contributions, not breakthroughs. The integration of all components into a system that satisfies the seven design constraints together is the engineering contribution.
+1. Cryptographic hash (BLAKE2b-128) used as the key for exact-match attention retrieval. Existing work uses LSH (approximate) or Hopfield (provable, but with separation preconditions on the data).
+2. Additive uniform mass floor for guaranteed nonzero per-token contribution. Existing attention-calibration work tackles related problems with different mechanisms.
+
+Both are small contributions, not breakthroughs. The integration of these pieces into one system that meets all seven design constraints together is the engineering work.
 
 ## Reproducing the results
 
-Hardware: NVIDIA H200 (or any GPU with sufficient VRAM for at least the 10K test). The 1B substrate test needs approximately 4 GB CPU RAM.
+Hardware: NVIDIA H200, or any GPU with enough VRAM for the 10K test. The 1B substrate test needs around 4 GB of CPU RAM.
 
 ```bash
-# Set up environment (Python 3.10+)
+# Python 3.10 or newer
 pip install torch transformers accelerate
 
-# Clone this repo
 git clone https://github.com/ffr1/unbounded-context-attention.git
 cd unbounded-context-attention
 
-# Run the constraint validation suite
 python eval_constraints.py
 ```
 
-The eval prints empirical numbers for each of the seven constraints. Expected runtime: 5-15 minutes on an H200.
+Expected runtime on an H200 is 5 to 15 minutes. The script prints the empirical numbers for each constraint as it goes.
 
-To run the perplexity / needle-in-a-haystack eval against BTLM-3B, you also need to download the BTLM weights and patch them. See the project files for setup scripts.
+To run the perplexity and needle-in-a-haystack eval against BTLM-3B, you also need the BTLM weights and a small patch step. The setup is in the project notes.
 
 ## Files
 
-- `pri_attention.py` — main attention implementation (chunked online softmax + mass floor + hash retrieval primitives)
-- `eval_constraints.py` — validation suite for the seven constraints
-- `eval_pri.py` — broader eval (perplexity, needle in haystack) requiring BTLM model
-- `RESULTS.md` — raw empirical output from the H200 run
-- `LICENSE` — MIT
-- `README.md` — this file
+* `pri_attention.py` is the main attention implementation. It contains the chunked online softmax, the mass floor mixing, and the hash retrieval primitives.
+* `eval_constraints.py` is the validation suite for the seven constraints listed above.
+* `eval_pri.py` is the broader eval, including perplexity and needle-in-a-haystack. It requires the BTLM model to be present.
+* `RESULTS.md` is the raw eval output from the H200 run.
+* `LICENSE` is MIT.
+* `README.md` is this file.
 
 ## License
 
-MIT. Use it however you want, including commercial use. Keep the license notice.
+MIT. Use it for anything, including commercial work. Keep the license notice with the code.
 
-## Contact and feedback
+## Feedback
 
-This is an early-stage prototype. Feedback welcome, especially:
-- Pointers to prior work I missed in the lit review
-- Specific use cases this might enable or block
-- Bugs in the eval or implementation
-- Suggestions for tighter empirical validation
+Useful feedback to send my way:
 
-Open an issue on this repo, or reach out via [Skorp7.com] (replace with your contact).
+* Prior work I missed in the lit review.
+* Use cases this enables or blocks in practice.
+* Bugs in the eval or implementation.
+* Tighter empirical tests that would strengthen or break the claims.
+
+Open an issue on this repo or reach out through Skorp7.com.
 
 ## Author
 
