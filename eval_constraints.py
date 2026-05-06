@@ -12,8 +12,8 @@ Tests:
   4. Constraint 1 verification: system runs at N=1B substrate (storage feasibility test)
 
 Usage:
-    python btlm/eval_constraints.py
-    python btlm/eval_constraints.py --skip-1b   # skip the 1B test (fast verification only)
+    python eval_constraints.py
+    python eval_constraints.py --skip-1b   # skip the 1B test (fast verification only)
 """
 from __future__ import annotations
 import argparse
@@ -26,9 +26,6 @@ from pathlib import Path
 import torch
 
 _HERE = Path(__file__).resolve().parent
-_PROJECT_ROOT = _HERE.parent
-
-MODEL_DIR = str(_PROJECT_ROOT / "models" / "btlm-3b-8k-base")
 
 # Add this dir to import pri_attention
 sys.path.insert(0, str(_HERE))
