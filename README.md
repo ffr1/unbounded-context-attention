@@ -28,7 +28,7 @@ All numbers below come from a single run on a single NVIDIA H200 GPU.
 | Implicit access | PASS | Hash retrieval primitive callable from inside forward-pass code. 100 of 100 retrievals succeeded. Neighborhood retrieval also working. |
 | Provable 100% recall | PASS | At N = 1,000,000 the system retrieved 1,000,000 of 1,000,000 stored tokens correctly. Hash table built in 0.82s, all retrievals completed in 2.30s. |
 
-Raw eval output is in `RESULTS.md`.
+Raw eval output is in [RESULTS.md](RESULTS.md).
 
 ## What this is not
 
